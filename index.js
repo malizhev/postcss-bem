@@ -1,4 +1,5 @@
 var postcss = require('postcss');
+var extend = require('util')._extend;
 var config = {
     suit: {
         separators: {
@@ -14,7 +15,8 @@ var config = {
             descendent: '__',
             modifier: '_'
         }
-    }
+    },
+    shortcuts: {}
 };
 
 module.exports = postcss.plugin('postcss-bem', function (opts) {
@@ -28,7 +30,62 @@ module.exports = postcss.plugin('postcss-bem', function (opts) {
         throw new Error('postcss-bem: opts.style may only be "suit" or "bem"');
     }
 
+    opts.shortcuts = extend(config.shortcuts, opts.shortcuts);
+
     var currentConfig = config[opts.style];
+
+    if (opts.separators) {
+        for (var customSeparator in opts.separators) {
+            if (!opts.separators.hasOwnProperty(customSeparator)) continue;
+
+            var separatorValue = opts.separators[customSeparator];
+            if (typeof separatorValue === 'string') {
+                currentConfig.separators[customSeparator] = separatorValue;
+            } else {
+                throw new Error('postcss-bem: opts.separators.' + customSeparator + ' must be a string');
+            }
+        }
+    }
+
+    function checkRuleMatches(name, rule) {
+        return rule.name === name || !!opts.shortcuts[name] && rule.name === opts.shortcuts[name];
+    }
+
+    function processModifierOrDescendent(name, rule, container, after) {
+        var separator;
+        var newName;
+        var last;
+        var newRule;
+        if (checkRuleMatches('modifier', rule)) {
+            separator = currentConfig.separators.modifier;
+        } else if (checkRuleMatches('descendent', rule)) {
+            separator = currentConfig.separators.descendent;
+        }
+
+        if(separator) {
+            newName = name + separator + rule.params;
+            newRule = postcss.rule({
+                selector: '.' + newName,
+                source: rule.source
+            });
+            container.insertAfter(after, newRule);
+            last = newRule;
+            rule.each(function (node) {
+                var subrule = false;
+                if (node.type === 'atrule') {
+                    subrule = processModifierOrDescendent(newName, node, container, last);
+                }
+                if (subrule) {
+                    last = subrule;
+                } else {
+                    node.moveTo(newRule);
+                }
+            });
+            rule.remove();
+            return last;
+        }
+        return false;
+    }
 
     function processComponent (component, namespace) {
         var name = component.params;
@@ -43,30 +100,14 @@ module.exports = postcss.plugin('postcss-bem', function (opts) {
             source: component.source
         });
         component.each(function (rule) {
-            var separator;
-            var newRule;
+            var newRule = false;
 
             if (rule.type === 'atrule') {
-                if (rule.name === 'modifier') {
-                    separator = currentConfig.separators.modifier;
-                } else if (rule.name === 'descendent') {
-                    separator = currentConfig.separators.descendent;
-                }
-
-                if(separator) {
-                    newRule = postcss.rule({
-                        selector: '.' + name + separator + rule.params,
-                        source: rule.source
-                    });
-                    rule.each(function (node) {
-                        node.moveTo(newRule);
-                    });
-                    component.parent.insertAfter(last, newRule);
-                    last = newRule;
-                    rule.removeSelf();
-                }
+                newRule = processModifierOrDescendent(name, rule, component.parent, last);
             }
-            if (!separator) {
+            if (newRule) {
+                last = newRule;
+            } else {
                 rule.moveTo(newComponent);
             }
         });
@@ -78,7 +119,8 @@ module.exports = postcss.plugin('postcss-bem', function (opts) {
         var namespaces = {};
 
         if (opts.style === 'suit') {
-            css.eachAtRule('utility', function (utility) {
+            css.walkAtRules(function (utility) {
+                if (!checkRuleMatches('utility', utility)) return;
                 if (!utility.params) {
                     throw utility.error('No names supplied to @utility');
                 }
@@ -129,16 +171,18 @@ module.exports = postcss.plugin('postcss-bem', function (opts) {
             });
         }
 
-        css.eachAtRule('component-namespace', function (namespace) {
+        css.walkAtRules(function (namespace) {
+            if ( !checkRuleMatches('component-namespace', namespace) ) return;
             var name = namespace.params;
 
             if (!namespace.nodes) {
                 namespaces[namespace.source.input.file || namespace.source.input.id] = name;
-                namespace.removeSelf();
+                namespace.remove();
                 return;
             }
 
-            namespace.eachAtRule('component', function (component) {
+            namespace.walkAtRules(function (component) {
+                if ( !checkRuleMatches('component', component) ) return;
                 processComponent(component, name);
             });
 
@@ -147,10 +191,11 @@ module.exports = postcss.plugin('postcss-bem', function (opts) {
                 node.moveAfter(namespace);
                 node = namespace.last;
             }
-            namespace.removeSelf();
+            namespace.remove();
         });
 
-        css.eachAtRule('component', function (component) {
+        css.walkAtRules(function (component) {
+            if ( !checkRuleMatches('component', component) ) return;
             var namespace = opts.defaultNamespace;
             var id = component.source.input.file || component.source.input.id;
             if (id in namespaces) {
@@ -161,7 +206,8 @@ module.exports = postcss.plugin('postcss-bem', function (opts) {
         });
 
         if (opts.style === 'suit') {
-            css.eachAtRule('when', function (when) {
+            css.walkAtRules(function (when) {
+                if ( !checkRuleMatches('when', when)) return;
                 var parent = when.parent;
 
                 if (parent === css || parent.type !== 'rule') {
@@ -184,7 +230,7 @@ module.exports = postcss.plugin('postcss-bem', function (opts) {
                     node.moveTo(newWhen);
                 });
                 newWhen.moveAfter(parent);
-                when.removeSelf();
+                when.remove();
             });
         }
     };
